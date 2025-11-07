@@ -149,13 +149,25 @@ def on_message(client, userdata, message):
     except Exception as e:
         print(f"on_message error: {e}")
 
+# Global MQTT client and control flags
+mqtt_client = None
+mqtt_stop_flag = threading.Event()
+processing_stop_flag = threading.Event()
+
 # Run MQTT listener in separate thread
 def _mqtt_loop():
-    client = mqtt.Client(mqtt.CallbackAPIVersion.VERSION2)
-    client.on_connect = on_connect
-    client.on_message = on_message
-    client.connect(BROKER, PORT, 60)
-    client.loop_forever()
+    global mqtt_client
+    mqtt_client = mqtt.Client(mqtt.CallbackAPIVersion.VERSION2)
+    mqtt_client.on_connect = on_connect
+    mqtt_client.on_message = on_message
+    mqtt_client.connect(BROKER, PORT, 60)
+
+    # Loop until stop flag is set
+    while not mqtt_stop_flag.is_set():
+        mqtt_client.loop(timeout=1.0)
+
+    mqtt_client.disconnect()
+    print("✓ MQTT client disconnected")
 
 def start_mqtt_once():
     """Ensure MQTT starts only once."""
@@ -163,6 +175,17 @@ def start_mqtt_once():
         return
     start_mqtt_once._started = True
     threading.Thread(target=_mqtt_loop, daemon=True).start()
+
+def stop_mqtt():
+    """Stop the MQTT client and background processing."""
+    global mqtt_connected
+    print("\nStopping MQTT subscriber...")
+    mqtt_stop_flag.set()
+    processing_stop_flag.set()
+    mqtt_connected = False
+    start_mqtt_once._started = False
+    print("✓ MQTT subscriber stopped")
+    print("  You can now restart it by calling run_dashboard() again")
 
 def round_to_bucket(timestamp_str):
     ts = pd.to_datetime(timestamp_str)
@@ -357,13 +380,14 @@ def integrate_data_sources():
 
 def process_queues_continuously():
     """Background thread to continuously process MQTT queues."""
-    while True:
+    while not processing_stop_flag.is_set():
         try:
             integrate_data_sources()
             time.sleep(1)  # Process every second
         except Exception as e:
             print(f"Error in queue processing: {e}")
             time.sleep(5)
+    print("✓ Background data processor stopped")
 
 # Dash App
 app = Dash(__name__)
@@ -398,7 +422,7 @@ app.index_string = """
 </html>
 """
 
-# Top bar UI
+# Top bar UI (spans full width including over sidebar)
 topbar = html.Div(
     [
         html.H1("Real-time Electricity Data",
@@ -413,19 +437,19 @@ topbar = html.Div(
     style={
         "position":"fixed",
         "top":"0",
-        "left":"250px",
+        "left":"0",
         "right":"0",
         "height":"60px",
         "backgroundColor":"#1a1a1a",
         "display":"flex",
         "alignItems":"center",
         "paddingLeft":"24px",
-        "zIndex":"999",
+        "zIndex":"1001",
         "borderBottom":"1px solid #333"
     },
 )
 
-# Sidebar UI
+# Sidebar UI (positioned below header)
 sidebar = html.Div(
     [
         html.Label("View Mode:",
@@ -483,7 +507,7 @@ sidebar = html.Div(
                style={"fontSize":"12px","color":"#999","margin":"0 16px 16px"}),
     ],
     style={
-        "width":"250px","position":"fixed","height":"100vh","top":"0","left":"0",
+        "width":"250px","position":"fixed","height":"calc(100vh - 60px)","top":"60px","left":"0",
         "backgroundColor":"#1e1e1e","overflowY":"auto","zIndex":"1000",
     },
 )
@@ -683,8 +707,14 @@ def run_dashboard(port=8052, jupyter_mode=False):
     Parameters:
     - port: Port to run on (default: 8052)
     - jupyter_mode: If True, runs in Jupyter-compatible mode with 127.0.0.1
+
+    To stop the dashboard: call stop_mqtt()
     """
     global facilities_metadata
+
+    # Reset stop flags if restarting
+    mqtt_stop_flag.clear()
+    processing_stop_flag.clear()
 
     # Load metadata once at startup
     print("Loading facility metadata from database...")
@@ -701,7 +731,13 @@ def run_dashboard(port=8052, jupyter_mode=False):
     if jupyter_mode:
         host = "127.0.0.1"
         print(f"\n✓ Dashboard starting on http://localhost:{port}\n")
-        app.run(host=host, port=port, debug=False, use_reloader=False, jupyter_mode='inline')
+        print(f"   To stop the subscriber: dashboard.stop_mqtt()\n")
+        try:
+            app.run(host=host, port=port, debug=False, use_reloader=False, jupyter_mode='inline')
+        except Exception as e:
+            # Suppress ContextVar errors in Jupyter
+            if "ContextVar" not in str(e):
+                print(f"Dashboard error: {e}")
     else:
         host = "0.0.0.0"
         print(f"\n✓ Dashboard starting on http://0.0.0.0:{port}\n")
