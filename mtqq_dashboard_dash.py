@@ -477,29 +477,33 @@ sidebar = html.Div(
         html.Label("Filter by Network Region",
                    style={"fontWeight":"bold","margin":"20px 16px 10px","color":"#ffffff","display":"block"}),
 
-        # Region filter
-        dcc.Dropdown(
-            id="region-filter",
-            multi=True,
-            placeholder="All regions",
-            value=[],
-            options=[],
-            clearable=True,
-            style={"margin":"0 16px 16px 16px"}
+        # Region filter with padding container
+        html.Div(
+            dcc.Dropdown(
+                id="region-filter",
+                multi=True,
+                placeholder="All regions",
+                value=[],
+                options=[],
+                clearable=True,
+            ),
+            style={"padding":"0 16px 16px 16px"}
         ),
 
         html.Label("Filter by Fuel Type",
                    style={"fontWeight":"bold","margin":"20px 16px 10px","color":"#ffffff","display":"block"}),
 
-        # Fuel filter
-        dcc.Dropdown(
-            id="fuel-filter",
-            multi=True,
-            placeholder="All fuel types",
-            value=[],
-            options=[],
-            clearable=True,
-            style={"margin":"0 16px 16px 16px"}
+        # Fuel filter with padding container
+        html.Div(
+            dcc.Dropdown(
+                id="fuel-filter",
+                multi=True,
+                placeholder="All fuel types",
+                value=[],
+                options=[],
+                clearable=True,
+            ),
+            style={"padding":"0 16px 16px 16px"}
         ),
 
         html.Hr(style={"borderColor":"#444","margin":"20px 16px"}),
