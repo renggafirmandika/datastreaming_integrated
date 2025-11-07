@@ -66,6 +66,12 @@ def normalize_fuel(val) -> str:
     key = s.lower().replace(" ", "")
     return FUEL_CANONICALS.get(key, s)
 
+def clean_region_name(region) -> str:
+    """Remove trailing '1' from region names for display (NSW1 -> NSW)."""
+    if region and isinstance(region, str) and region.endswith('1'):
+        return region[:-1]
+    return region
+
 def get_data_from_db():
     con = duckdb.connect("energy_dw.duckdb", read_only=True)
 
@@ -479,7 +485,7 @@ sidebar = html.Div(
             value=[],
             options=[],
             clearable=True,
-            style={"margin":"0 16px 16px"}
+            style={"margin":"0 16px 16px 16px"}
         ),
 
         html.Label("Filter by Fuel Type",
@@ -493,7 +499,7 @@ sidebar = html.Div(
             value=[],
             options=[],
             clearable=True,
-            style={"margin":"0 16px 16px"}
+            style={"margin":"0 16px 16px 16px"}
         ),
 
         html.Hr(style={"borderColor":"#444","margin":"20px 16px"}),
@@ -540,8 +546,11 @@ def refresh_filters(_):
     snap = dict(facilities_data)
     regions, fuels = set(), set()
     for r in snap.values():
-        if r.get("network_region"): regions.add(r["network_region"])
-        if r.get("fuel_type"): fuels.add(r["fuel_type"])
+        if r.get("network_region"):
+            # Clean region name for display
+            regions.add(clean_region_name(r["network_region"]))
+        if r.get("fuel_type"):
+            fuels.add(r["fuel_type"])
     region_opts = [{"label":x,"value":x} for x in sorted(regions)]
     fuel_opts = [{"label":x,"value":x} for x in sorted(fuels)]
     return region_opts, fuel_opts
@@ -572,6 +581,41 @@ def update_map(_, view_mode, region_sel, fuel_sel, relayout, map_state):
 
     snap = dict(facilities_data)
 
+    # Show empty state if no data yet
+    if not snap:
+        # Create empty figure with message
+        fig = go.Figure()
+        fig.update_layout(
+            mapbox=dict(style="open-street-map",
+                        center=map_state["center"], zoom=map_state["zoom"]),
+            margin=dict(l=0, r=0, t=40, b=0),
+            annotations=[
+                dict(
+                    text="Waiting for data...<br>Make sure the MQTT publisher is running",
+                    xref="paper", yref="paper",
+                    x=0.5, y=0.5,
+                    showarrow=False,
+                    font=dict(size=16, color="#999"),
+                    xanchor="center", yanchor="middle"
+                )
+            ],
+            paper_bgcolor="#ffffff",
+            plot_bgcolor="#ffffff",
+        )
+
+        stats = html.Div(
+            [
+                html.H2("0",
+                        style={"margin":"0","color":"#fff","fontSize":"28px","fontWeight":"bold"}),
+                html.P("FACILITIES",
+                       style={"margin":"2px 0 0","color":"#999","fontSize":"12px","textTransform":"uppercase","letterSpacing":"1px"}),
+                html.P("Processing data...",
+                       style={"margin":"8px 0 0","color":"#666","fontSize":"11px","fontStyle":"italic"}),
+            ]
+        )
+
+        return fig, stats, map_state
+
     # Determine latest price/demand per region
     latest_by_region = {}
     for r in snap.values():
@@ -585,6 +629,7 @@ def update_map(_, view_mode, region_sel, fuel_sel, relayout, map_state):
                 "price": r.get("price") or 0.0,
                 "demand": r.get("demand_energy") or 0.0,
                 "ts": ts,
+                "display_name": clean_region_name(reg)
             }
 
     # Filter facilities
@@ -592,7 +637,9 @@ def update_map(_, view_mode, region_sel, fuel_sel, relayout, map_state):
     for r in snap.values():
         if not r.get("lat") or not r.get("lng"):
             continue
-        if region_set and r.get("network_region") not in region_set:
+        # Match against cleaned region name for filtering
+        clean_reg = clean_region_name(r.get("network_region"))
+        if region_set and clean_reg not in region_set:
             continue
         if fuel_set and r.get("fuel_type") not in fuel_set:
             continue
@@ -643,16 +690,17 @@ def update_map(_, view_mode, region_sel, fuel_sel, relayout, map_state):
         texts = []
         for r in items:
             reg = r.get("network_region") or "-"
-            reg_stats = latest_by_region.get(reg, {"price":0.0, "demand":0.0, "ts": datetime.min})
+            clean_reg = clean_region_name(reg)
+            reg_stats = latest_by_region.get(reg, {"price":0.0, "demand":0.0, "ts": datetime.min, "display_name": clean_reg})
             texts.append(
                 f"<b>{r.get('facility_name') or r['facility_code']}</b><br>"
                 f"Code: {r['facility_code']}<br>"
-                f"Region: {reg}<br>"
+                f"Region: {clean_reg}<br>"
                 f"Fuel: {fuel}<br>"
                 f"Power: {fmt2(r.get('power'))} MW<br>"
                 f"Emissions: {fmt2(r.get('emissions'))} t<br>"
-                f"<b>Regional price ({reg}):</b> {fmt2(reg_stats['price'])} $/MWh<br>"
-                f"<b>Regional demand ({reg}):</b> {fmt2(reg_stats['demand'])} MWh<br>"
+                f"<b>Regional price ({clean_reg}):</b> {fmt2(reg_stats['price'])} $/MWh<br>"
+                f"<b>Regional demand ({clean_reg}):</b> {fmt2(reg_stats['demand'])} MWh<br>"
                 f"Updated: {r.get('timestamp') or '-'}"
             )
 
