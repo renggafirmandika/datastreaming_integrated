@@ -36,7 +36,8 @@ pending_facilities = []
 MAX_PENDING_AGE_SECONDS = 30  # Maximum time to hold pending data
 
 # Watermark tracking for late data handling
-WATERMARK_LAG_SECONDS = 10  # Allow data up to 10 seconds late
+# Match the join window (TIME_BUCKET_MINUTES * 2) to allow data from previous bucket
+WATERMARK_LAG_SECONDS = TIME_BUCKET_MINUTES * 60 * 2  # 10 minutes (2 buckets)
 market_watermark = None  # Track the latest market timestamp
 facility_watermark = None  # Track the latest facility timestamp
 
