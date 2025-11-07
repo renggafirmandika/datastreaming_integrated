@@ -36,7 +36,8 @@ pending_facilities = []
 MAX_PENDING_AGE_SECONDS = 30  # Maximum time to hold pending data
 
 # Watermark tracking for late data handling
-WATERMARK_LAG_SECONDS = 10  # Allow data up to 10 seconds late
+# Match the join window (TIME_BUCKET_MINUTES * 2) to allow data from previous bucket
+WATERMARK_LAG_SECONDS = TIME_BUCKET_MINUTES * 60 * 2  # 10 minutes (2 buckets)
 market_watermark = None  # Track the latest market timestamp
 facility_watermark = None  # Track the latest facility timestamp
 
@@ -286,7 +287,7 @@ def integrate_data_sources():
             facility_code = msg['facility_code']
             msg_timestamp = pd.to_datetime(msg['timestamp'])
 
-            # Update facility watermark
+            # Update facility watermark (for monitoring)
             if facility_watermark is None or msg_timestamp > facility_watermark:
                 facility_watermark = msg_timestamp
             elif msg_timestamp < facility_watermark - timedelta(seconds=WATERMARK_LAG_SECONDS):
@@ -303,14 +304,17 @@ def integrate_data_sources():
             # Try to process with current market data
             record, has_market = process_facility_message(msg, metadata)
 
-            # Watermark-based decision: if data is late and market data exists, process immediately
-            # Otherwise, use the normal pending queue logic
-            if has_market or (msg_timestamp < facility_watermark - timedelta(seconds=WATERMARK_LAG_SECONDS)):
-                # Has market data OR is late data - process immediately
+            # Watermark-based decision: Use MARKET watermark to decide if we should wait
+            # If market stream has moved past this timestamp, process immediately (don't wait)
+            market_has_passed = (market_watermark is not None and
+                               msg_timestamp < market_watermark - timedelta(seconds=WATERMARK_LAG_SECONDS))
+
+            if has_market or market_has_passed:
+                # Has market data OR market stream has moved past this timestamp - process immediately
                 facilities_data[facility_code] = record
                 facility_processed += 1
             else:
-                # No market data yet and within watermark window - add to pending queue
+                # No market data yet and market stream hasn't passed this timestamp - add to pending queue
                 pending_facilities.append({
                     'msg': msg,
                     'metadata': metadata,

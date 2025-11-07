@@ -36,7 +36,8 @@ pending_facilities = []
 MAX_PENDING_AGE_SECONDS = 30  # Maximum time to hold pending data
 
 # Watermark tracking for late data handling
-WATERMARK_LAG_SECONDS = 10  # Allow data up to 10 seconds late
+# Match the join window (TIME_BUCKET_MINUTES * 2) to allow data from previous bucket
+WATERMARK_LAG_SECONDS = TIME_BUCKET_MINUTES * 60 * 2  # 10 minutes (2 buckets)
 market_watermark = None  # Track the latest market timestamp
 facility_watermark = None  # Track the latest facility timestamp
 
@@ -286,7 +287,7 @@ def integrate_data_sources():
             facility_code = msg['facility_code']
             msg_timestamp = pd.to_datetime(msg['timestamp'])
 
-            # Update facility watermark
+            # Update facility watermark (for monitoring)
             if facility_watermark is None or msg_timestamp > facility_watermark:
                 facility_watermark = msg_timestamp
             elif msg_timestamp < facility_watermark - timedelta(seconds=WATERMARK_LAG_SECONDS):
@@ -303,14 +304,17 @@ def integrate_data_sources():
             # Try to process with current market data
             record, has_market = process_facility_message(msg, metadata)
 
-            # Watermark-based decision: if data is late and market data exists, process immediately
-            # Otherwise, use the normal pending queue logic
-            if has_market or (msg_timestamp < facility_watermark - timedelta(seconds=WATERMARK_LAG_SECONDS)):
-                # Has market data OR is late data - process immediately
+            # Watermark-based decision: Use MARKET watermark to decide if we should wait
+            # If market stream has moved past this timestamp, process immediately (don't wait)
+            market_has_passed = (market_watermark is not None and
+                               msg_timestamp < market_watermark - timedelta(seconds=WATERMARK_LAG_SECONDS))
+
+            if has_market or market_has_passed:
+                # Has market data OR market stream has moved past this timestamp - process immediately
                 facilities_data[facility_code] = record
                 facility_processed += 1
             else:
-                # No market data yet and within watermark window - add to pending queue
+                # No market data yet and market stream hasn't passed this timestamp - add to pending queue
                 pending_facilities.append({
                     'msg': msg,
                     'metadata': metadata,
@@ -394,14 +398,38 @@ app.index_string = """
 </html>
 """
 
+# Top bar UI
+topbar = html.Div(
+    [
+        html.H1("Real-time Electricity Data",
+                style={
+                    "color":"#fff",
+                    "fontSize":"24px",
+                    "margin":"0",
+                    "fontWeight":"600",
+                    "letterSpacing":"0.5px"
+                }),
+    ],
+    style={
+        "position":"fixed",
+        "top":"0",
+        "left":"250px",
+        "right":"0",
+        "height":"60px",
+        "backgroundColor":"#1a1a1a",
+        "display":"flex",
+        "alignItems":"center",
+        "paddingLeft":"24px",
+        "zIndex":"999",
+        "borderBottom":"1px solid #333"
+    },
+)
+
 # Sidebar UI
 sidebar = html.Div(
     [
-        html.H1("OPEN ELECTRICITY",
-                style={"color":"#fff","fontSize":"28px","margin":"18px 16px 18px","letterSpacing":"0.5px"}),
-
         html.Label("View Mode:",
-                   style={"fontWeight":"bold","margin":"6px 16px","color":"#ffffff","display":"block"}),
+                   style={"fontWeight":"bold","margin":"20px 16px 10px","color":"#ffffff","display":"block"}),
 
         # Switch between 4 display modes
         dcc.RadioItems(
@@ -413,11 +441,11 @@ sidebar = html.Div(
                 {"label":"Price ($/MWh)","value":"price"},
             ],
             value="power",
-            style={"margin":"0 16px 8px","color":"#bbb"},
+            style={"margin":"0 16px 16px","color":"#bbb"},
         ),
 
         html.Label("Filter by Network Region",
-                   style={"fontWeight":"bold","margin":"10px 16px 6px","color":"#ffffff","display":"block"}),
+                   style={"fontWeight":"bold","margin":"20px 16px 10px","color":"#ffffff","display":"block"}),
 
         # Region filter
         dcc.Dropdown(
@@ -427,11 +455,11 @@ sidebar = html.Div(
             value=[],
             options=[],
             clearable=True,
-            style={"margin":"0 5px 10px"}
+            style={"margin":"0 16px 16px"}
         ),
 
         html.Label("Filter by Fuel Type",
-                   style={"fontWeight":"bold","margin":"10px 16px 6px","color":"#ffffff","display":"block"}),
+                   style={"fontWeight":"bold","margin":"20px 16px 10px","color":"#ffffff","display":"block"}),
 
         # Fuel filter
         dcc.Dropdown(
@@ -441,13 +469,15 @@ sidebar = html.Div(
             value=[],
             options=[],
             clearable=True,
-            style={"margin":"0 5px 10px"}
+            style={"margin":"0 16px 16px"}
         ),
 
-        # Facility count display
-        html.Div(id="stats", style={"margin":"8px 16px","color":"#999"}),
+        html.Hr(style={"borderColor":"#444","margin":"20px 16px"}),
 
-        html.Hr(style={"borderColor":"#444","margin":"12px 16px"}),
+        # Facility count display
+        html.Div(id="stats", style={"margin":"16px 16px","color":"#999"}),
+
+        html.Hr(style={"borderColor":"#444","margin":"20px 16px"}),
 
         html.P("Real-time updates enabled",
                style={"fontSize":"12px","color":"#999","margin":"0 16px 16px"}),
@@ -461,11 +491,12 @@ sidebar = html.Div(
 # App layout
 app.layout = html.Div(
     [
+        topbar,
         sidebar,
         html.Div(
-            [dcc.Graph(id="facility-map", style={"height":"100vh","width":"100%"},
+            [dcc.Graph(id="facility-map", style={"height":"calc(100vh - 60px)","width":"100%"},
                        config={"scrollZoom": True})],
-            style={"marginLeft":"250px","width":"calc(100% - 250px)","height":"100vh"},
+            style={"marginLeft":"250px","marginTop":"60px","width":"calc(100% - 250px)","height":"calc(100vh - 60px)"},
         ),
         # Auto-refresh every 8s
         dcc.Interval(id="interval", interval=8000, n_intervals=0),
@@ -644,18 +675,38 @@ def update_map(_, view_mode, region_sel, fuel_sel, relayout, map_state):
     return fig, stats, map_state
 
 
-# Run app
-if __name__ == "__main__":
+# Function to run dashboard (for notebook compatibility)
+def run_dashboard(port=8052, jupyter_mode=False):
+    """
+    Run the dashboard application.
+
+    Parameters:
+    - port: Port to run on (default: 8052)
+    - jupyter_mode: If True, runs in Jupyter-compatible mode with 127.0.0.1
+    """
+    global facilities_metadata
+
     # Load metadata once at startup
     print("Loading facility metadata from database...")
     facilities_metadata = get_data_from_db()
-    
+
     # Start MQTT connection
     start_mqtt_once()
-    
+
     # Start background queue processor
     print("Starting background data processor...")
     threading.Thread(target=process_queues_continuously, daemon=True).start()
-    
-    print("\n✓ Dashboard starting on http://0.0.0.0:8051\n")
-    app.run(host="0.0.0.0", port=8052, debug=False, use_reloader=False)
+
+    # Use localhost for Jupyter (Windows compatibility), 0.0.0.0 for standalone
+    if jupyter_mode:
+        host = "127.0.0.1"
+        print(f"\n✓ Dashboard starting on http://localhost:{port}\n")
+        app.run(host=host, port=port, debug=False, use_reloader=False, jupyter_mode='inline')
+    else:
+        host = "0.0.0.0"
+        print(f"\n✓ Dashboard starting on http://0.0.0.0:{port}\n")
+        app.run(host=host, port=port, debug=False, use_reloader=False)
+
+# Run app
+if __name__ == "__main__":
+    run_dashboard()
