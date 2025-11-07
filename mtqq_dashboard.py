@@ -119,11 +119,11 @@ def on_connect(client, userdata, flags, reason_code, properties=None):
     if mqtt_connected:
         client.subscribe([
             (FACILITY_TOPIC, 1),
-            (MARKET_TOPIC, 1)
+            (f"{MARKET_TOPIC}/#", 1)
         ])
         print(f"✓ Successfully connected to MQTT broker and subscribed to:")
         print(f"   - {FACILITY_TOPIC}")
-        print(f"   - {MARKET_TOPIC}\n")
+        print(f"   - {MARKET_TOPIC}/#\n")
     else:
         print(f"✗ Failed to connect. rc={reason_code}")
 
@@ -133,7 +133,7 @@ def on_message(client, userdata, message):
         payload = json.loads(message.payload.decode())
         if message.topic == FACILITY_TOPIC:
             facility_queue.put(payload)
-        elif message.topic == MARKET_TOPIC:
+        elif message.topic.startswith(MARKET_TOPIC):
             market_queue.put(payload)
 
     except Exception as e:
