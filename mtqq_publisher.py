@@ -104,12 +104,17 @@ def publish_combined(facility_df, market_df):
     facility_df['record_type'] = 'facility'
     market_df['record_type'] = 'market'
 
+    # Add priority: market data (0) before facility data (1)
+    facility_df['priority'] = 1
+    market_df['priority'] = 0
+
     all_data = pd.concat([
-        facility_df[['timestamp', 'record_type', 'facility_code', 'power', 'emissions']],
-        market_df[['timestamp', 'record_type', 'network_region', 'price', 'demand_energy']]
+        facility_df[['timestamp', 'record_type', 'priority', 'facility_code', 'power', 'emissions']],
+        market_df[['timestamp', 'record_type', 'priority', 'network_region', 'price', 'demand_energy']]
     ], ignore_index=True)
 
-    all_data = all_data.sort_values('timestamp').reset_index(drop=True)
+    # Sort by timestamp first, then by priority (market before facility)
+    all_data = all_data.sort_values(['timestamp', 'priority']).reset_index(drop=True)
 
     iteration = 0
 
