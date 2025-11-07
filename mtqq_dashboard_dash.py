@@ -23,13 +23,22 @@ TIME_BUCKET_MINUTES = 5
 facility_queue = queue.Queue()
 market_queue = queue.Queue()
 
-facility_buckets = defaultdict(lambda: defaultdict(dict))  
+facility_buckets = defaultdict(lambda: defaultdict(dict))
 market_buckets = defaultdict(lambda: defaultdict(dict))
 
 # Global state storage for latest facility readings
 facilities_data = {}
 facilities_metadata = {}
 mqtt_connected = False
+
+# Pending facility messages waiting for market data
+pending_facilities = []
+MAX_PENDING_AGE_SECONDS = 30  # Maximum time to hold pending data
+
+# Watermark tracking for late data handling
+WATERMARK_LAG_SECONDS = 10  # Allow data up to 10 seconds late
+market_watermark = None  # Track the latest market timestamp
+facility_watermark = None  # Track the latest facility timestamp
 
 # Fuel type standardization
 FUEL_CANONICALS = {
@@ -160,19 +169,73 @@ def round_to_bucket(timestamp_str):
     bucket = ts.replace(minute=minutes, second=0, microsecond=0)
     return bucket.isoformat()
 
+def process_facility_message(msg, metadata):
+    """Process a single facility message and integrate with market data."""
+    facility_code = msg['facility_code']
+    region = metadata['region']
+    bucket = round_to_bucket(msg['timestamp'])
+
+    # Try to find matching market data
+    market_data = market_buckets.get(bucket, {}).get(region, {})
+
+    if not market_data:
+        prev_bucket = (pd.to_datetime(bucket) -
+                      timedelta(minutes=TIME_BUCKET_MINUTES)).isoformat()
+        market_data = market_buckets.get(prev_bucket, {}).get(region, {})
+
+    integrated_record = {
+        # From MQTT Facilities
+        'facility_code': facility_code,
+        'power': msg['power'],
+        'emissions': msg['emissions'],
+        'timestamp': msg['timestamp'],
+        'time_bucket': bucket,
+
+        # From Database
+        'facility_name': metadata['facility_name'],
+        'network_region': region,
+        'lat': metadata['lat'],
+        'lng': metadata['lng'],
+        'fuel_type': metadata['fuel_type'],
+
+        # From MQTT Market
+        'price': market_data.get('price'),
+        'demand_energy': market_data.get('demand_energy'),
+        'market_timestamp': market_data.get('timestamp'),
+
+        # Data quality
+        'has_market_data': bool(market_data)
+    }
+
+    return integrated_record, bool(market_data)
+
 def integrate_data_sources():
     """Process queued MQTT messages and integrate with database metadata."""
-    global facilities_data, facilities_metadata
-    
+    global facilities_data, facilities_metadata, pending_facilities
+    global market_watermark, facility_watermark
+
     facility_processed = 0
     market_processed = 0
+    pending_added = 0
+    pending_resolved = 0
+    late_market_count = 0
+    late_facility_count = 0
 
-    # Process market data first
+    # Step 1: Process ALL market data first and update watermark
     while not market_queue.empty():
         try:
             msg = market_queue.get_nowait()
             bucket = round_to_bucket(msg['timestamp'])
             region = msg['region']
+            msg_timestamp = pd.to_datetime(msg['timestamp'])
+
+            # Update market watermark
+            if market_watermark is None or msg_timestamp > market_watermark:
+                market_watermark = msg_timestamp
+            elif msg_timestamp < market_watermark - timedelta(seconds=WATERMARK_LAG_SECONDS):
+                # This is late data (arrived after watermark passed)
+                late_market_count += 1
+                print(f"⚠ Late market data detected: {region} @ {msg['timestamp']} (watermark: {market_watermark})")
 
             market_buckets[bucket][region] = {
                 'price': msg['price'],
@@ -185,64 +248,106 @@ def integrate_data_sources():
         except Exception as e:
             print(f"Error processing market data: {e}")
 
-    # Process facility data
+    # Step 2: If market data was received, retry pending facilities
+    if market_processed > 0 and pending_facilities:
+        still_pending = []
+        for pending_item in pending_facilities:
+            msg = pending_item['msg']
+            metadata = pending_item['metadata']
+            received_time = pending_item['received_time']
+
+            # Check age - drop if too old
+            age = time.time() - received_time
+            if age > MAX_PENDING_AGE_SECONDS:
+                # Process anyway, even without market data
+                record, _ = process_facility_message(msg, metadata)
+                facilities_data[msg['facility_code']] = record
+                facility_processed += 1
+                continue
+
+            # Try to process again
+            record, has_market = process_facility_message(msg, metadata)
+
+            if has_market:
+                # Market data now available!
+                facilities_data[msg['facility_code']] = record
+                facility_processed += 1
+                pending_resolved += 1
+            else:
+                # Still no market data, keep pending
+                still_pending.append(pending_item)
+
+        pending_facilities = still_pending
+
+    # Step 3: Process NEW facility data with watermark tracking
     while not facility_queue.empty():
         try:
             msg = facility_queue.get_nowait()
             facility_code = msg['facility_code']
+            msg_timestamp = pd.to_datetime(msg['timestamp'])
+
+            # Update facility watermark
+            if facility_watermark is None or msg_timestamp > facility_watermark:
+                facility_watermark = msg_timestamp
+            elif msg_timestamp < facility_watermark - timedelta(seconds=WATERMARK_LAG_SECONDS):
+                # This is late data (arrived after watermark passed)
+                late_facility_count += 1
+                print(f"⚠ Late facility data detected: {facility_code} @ {msg['timestamp']} (watermark: {facility_watermark})")
 
             # Check if we have metadata for this facility
             if facility_code not in facilities_metadata:
                 continue
 
             metadata = facilities_metadata[facility_code]
-            region = metadata['region']
 
-            bucket = round_to_bucket(msg['timestamp'])
+            # Try to process with current market data
+            record, has_market = process_facility_message(msg, metadata)
 
-            # Try to find matching market data
-            market_data = market_buckets.get(bucket, {}).get(region, {})
+            # Watermark-based decision: if data is late and market data exists, process immediately
+            # Otherwise, use the normal pending queue logic
+            if has_market or (msg_timestamp < facility_watermark - timedelta(seconds=WATERMARK_LAG_SECONDS)):
+                # Has market data OR is late data - process immediately
+                facilities_data[facility_code] = record
+                facility_processed += 1
+            else:
+                # No market data yet and within watermark window - add to pending queue
+                pending_facilities.append({
+                    'msg': msg,
+                    'metadata': metadata,
+                    'received_time': time.time()
+                })
+                pending_added += 1
 
-            if not market_data:
-                prev_bucket = (pd.to_datetime(bucket) - 
-                              timedelta(minutes=TIME_BUCKET_MINUTES)).isoformat()
-                market_data = market_buckets.get(prev_bucket, {}).get(region, {})
-
-            integrated_record = {
-                # From MQTT Facilities
-                'facility_code': facility_code,
-                'power': msg['power'],
-                'emissions': msg['emissions'],
-                'timestamp': msg['timestamp'],
-                'time_bucket': bucket,
-                
-                # From Database
-                'facility_name': metadata['facility_name'],
-                'network_region': region,
-                'lat': metadata['lat'],
-                'lng': metadata['lng'],
-                'fuel_type': metadata['fuel_type'],
-                
-                # From MQTT Market
-                'price': market_data.get('price'),
-                'demand_energy': market_data.get('demand_energy'),
-                'market_timestamp': market_data.get('timestamp'),
-                
-                # Data quality
-                'has_market_data': bool(market_data)
-            }
-            
-            facilities_data[facility_code] = integrated_record
-            facility_processed += 1
-        
         except queue.Empty:
             break
         except Exception as e:
             print(f"Error integrating facility data: {e}")
 
-    # Only log if data was processed
-    if facility_processed > 0 or market_processed > 0:
-        print(f"✓ Processed: {facility_processed} facilities, {market_processed} market updates | Total facilities: {len(facilities_data)}")
+    # Log status with watermark info
+    if facility_processed > 0 or market_processed > 0 or pending_added > 0 or pending_resolved > 0:
+        status_parts = [f"Processed: {facility_processed} facilities, {market_processed} market updates"]
+        if pending_resolved > 0:
+            status_parts.append(f"resolved {pending_resolved} pending")
+        if pending_added > 0:
+            status_parts.append(f"added {pending_added} to pending")
+        if len(pending_facilities) > 0:
+            status_parts.append(f"waiting: {len(pending_facilities)}")
+        if late_market_count > 0:
+            status_parts.append(f"late market: {late_market_count}")
+        if late_facility_count > 0:
+            status_parts.append(f"late facility: {late_facility_count}")
+        status_parts.append(f"Total facilities: {len(facilities_data)}")
+
+        # Show watermark timestamps
+        watermark_info = []
+        if market_watermark:
+            watermark_info.append(f"Market WM: {market_watermark.strftime('%H:%M:%S')}")
+        if facility_watermark:
+            watermark_info.append(f"Facility WM: {facility_watermark.strftime('%H:%M:%S')}")
+        if watermark_info:
+            status_parts.append(' | '.join(watermark_info))
+
+        print(f"✓ {' | '.join(status_parts)}")
 
     return facility_processed, market_processed
 
