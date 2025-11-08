@@ -284,51 +284,51 @@ def integrate_data_sources():
 
         # If we've moved to a new bucket, perform forward-fill for facilities that didn't update
         if previous_watermark_bucket != new_watermark_bucket:
-            # Moving to new bucket - reset tracking
-            if current_processing_bucket != new_watermark_bucket:
+            # We're entering a new bucket - forward-fill for the bucket we just left
+            if previous_watermark_bucket is not None and last_known_facility_values:
                 # Forward-fill facilities that didn't send updates in the previous bucket
-                if last_known_facility_values and current_processing_bucket is not None:
-                    for facility_code, last_values in last_known_facility_values.items():
-                        if facility_code not in facilities_updated_this_bucket and facility_code in facilities_metadata:
-                            # This facility didn't send update - forward-fill with last known values
-                            metadata = facilities_metadata[facility_code]
-                            region = metadata['region']
+                for facility_code, last_values in last_known_facility_values.items():
+                    if facility_code not in facilities_updated_this_bucket and facility_code in facilities_metadata:
+                        # This facility didn't send update - forward-fill with last known values
+                        metadata = facilities_metadata[facility_code]
+                        region = metadata['region']
 
-                            # Get market data for current bucket
-                            market_data = market_buckets.get(current_processing_bucket, {}).get(region, {})
+                        # Get market data for the NEW bucket (where we're advancing to)
+                        market_data = market_buckets.get(new_watermark_bucket, {}).get(region, {})
 
-                            # Create forward-filled record with CURRENT bucket timestamp
-                            integrated_record = {
-                                # From last known values (unchanged)
-                                'facility_code': facility_code,
-                                'power': last_values['power'],
-                                'emissions': last_values['emissions'],
-                                'timestamp': current_processing_bucket,  # Update to current bucket!
-                                'time_bucket': current_processing_bucket,
+                        # Create forward-filled record with NEW bucket timestamp
+                        integrated_record = {
+                            # From last known values (unchanged)
+                            'facility_code': facility_code,
+                            'power': last_values['power'],
+                            'emissions': last_values['emissions'],
+                            'timestamp': new_watermark_bucket,  # Update to NEW bucket!
+                            'time_bucket': new_watermark_bucket,
 
-                                # From Database
-                                'facility_name': metadata['facility_name'],
-                                'network_region': region,
-                                'lat': metadata['lat'],
-                                'lng': metadata['lng'],
-                                'fuel_type': metadata['fuel_type'],
+                            # From Database
+                            'facility_name': metadata['facility_name'],
+                            'network_region': region,
+                            'lat': metadata['lat'],
+                            'lng': metadata['lng'],
+                            'fuel_type': metadata['fuel_type'],
 
-                                # From MQTT Market
-                                'price': market_data.get('price'),
-                                'demand_energy': market_data.get('demand_energy'),
-                                'market_timestamp': market_data.get('timestamp'),
+                            # From MQTT Market
+                            'price': market_data.get('price'),
+                            'demand_energy': market_data.get('demand_energy'),
+                            'market_timestamp': market_data.get('timestamp'),
 
-                                # Data quality
-                                'has_market_data': bool(market_data),
-                                'forward_filled': True  # Mark as forward-filled
-                            }
+                            # Data quality
+                            'has_market_data': bool(market_data),
+                            'forward_filled': True  # Mark as forward-filled
+                        }
 
-                            facilities_data[facility_code] = integrated_record
-                            forward_filled_count += 1
+                        facilities_data[facility_code] = integrated_record
+                        forward_filled_count += 1
+                        print(f"[FORWARD-FILL] {facility_code} @ {new_watermark_bucket} (power={last_values['power']}, emissions={last_values['emissions']})")
 
-                # Reset for new bucket
-                current_processing_bucket = new_watermark_bucket
-                facilities_updated_this_bucket.clear()
+            # Reset for new bucket
+            current_processing_bucket = new_watermark_bucket
+            facilities_updated_this_bucket.clear()
 
     # Step 2: If market data was received, retry pending facilities
     if market_processed > 0 and pending_facilities:

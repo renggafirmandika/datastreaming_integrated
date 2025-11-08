@@ -178,6 +178,10 @@ def publish_combined(facility_df, market_df):
                         print(f"[UPDATED] Facility: {facility_code} @ {row['timestamp']} (power={current_power}, emissions={current_emissions})")
                     facility_count += 1
                 else:
+                    # Skipped - show what we're comparing
+                    last_power = last_published_facility[facility_code]['power']
+                    last_emissions = last_published_facility[facility_code]['emissions']
+                    print(f"[SKIPPED] Facility: {facility_code} @ {row['timestamp']} (current: power={current_power}, emissions={current_emissions} | previous: power={last_power}, emissions={last_emissions})")
                     facility_skipped += 1
 
             else:  # Market data - always publish
