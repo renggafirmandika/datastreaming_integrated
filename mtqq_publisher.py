@@ -117,7 +117,7 @@ def publish_combined(facility_df, market_df):
     all_data = all_data.sort_values(['timestamp', 'priority']).reset_index(drop=True)
 
     # Track last published values for change detection
-    # Key: (facility_code, timestamp), Value: {power, emissions}
+    # Key: facility_code, Value: {power, emissions}
     last_published_facility = {}
 
     iteration = 0
@@ -125,16 +125,12 @@ def publish_combined(facility_df, market_df):
     while True:
         iteration += 1
 
-        is_first_iteration = (iteration == 1)
-
-        if is_first_iteration:
-            print("\n[INITIAL STATE] Publishing all facility data to establish baseline...")
-        else:
-            print(f"\n[UPDATE MODE] Publishing only changed facility data (iteration {iteration})...")
+        print(f"\n[ITERATION {iteration}] Publishing data stream...")
 
         facility_count = 0
         facility_skipped = 0
         market_count = 0
+        first_publish_count = 0
 
         for idx, row in all_data.iterrows():
             if row['record_type'] == 'facility':
@@ -143,22 +139,22 @@ def publish_combined(facility_df, market_df):
                 current_power = float(row['power']) if pd.notna(row['power']) else None
                 current_emissions = float(row['emissions']) if pd.notna(row['emissions']) else None
 
-                # Create unique key for this facility-timestamp combination
-                facility_ts_key = (facility_code, timestamp_str)
+                # Check if this facility has been published before
+                should_publish = False
+                is_first_publish = facility_code not in last_published_facility
 
-                # Check if this is a new facility or values have changed
-                should_publish = is_first_iteration
+                if is_first_publish:
+                    # First time seeing this facility - always publish
+                    should_publish = True
+                    first_publish_count += 1
+                else:
+                    # Compare with last published values
+                    last_power = last_published_facility[facility_code]['power']
+                    last_emissions = last_published_facility[facility_code]['emissions']
 
-                if not is_first_iteration and facility_ts_key in last_published_facility:
-                    last_power = last_published_facility[facility_ts_key]['power']
-                    last_emissions = last_published_facility[facility_ts_key]['emissions']
-
-                    # Publish if power or emissions changed from last iteration's same timestamp
+                    # Publish if power or emissions changed from previous timestamp
                     if current_power != last_power or current_emissions != last_emissions:
                         should_publish = True
-                elif not is_first_iteration:
-                    # New facility-timestamp appearing after first iteration
-                    should_publish = True
 
                 if should_publish:
                     payload = {
@@ -170,14 +166,14 @@ def publish_combined(facility_df, market_df):
 
                     client.publish(FACILITY_TOPIC, json.dumps(payload), qos=1)
 
-                    # Update tracking with facility-timestamp key
-                    last_published_facility[facility_ts_key] = {
+                    # Update tracking with latest values
+                    last_published_facility[facility_code] = {
                         'power': current_power,
                         'emissions': current_emissions
                     }
 
-                    if is_first_iteration:
-                        print(f"[INITIAL] Facility: {facility_code} @ {row['timestamp']}")
+                    if is_first_publish:
+                        print(f"[FIRST] Facility: {facility_code} @ {row['timestamp']} (power={current_power}, emissions={current_emissions})")
                     else:
                         print(f"[UPDATED] Facility: {facility_code} @ {row['timestamp']} (power={current_power}, emissions={current_emissions})")
                     facility_count += 1
@@ -206,8 +202,11 @@ def publish_combined(facility_df, market_df):
 
         print(f"\n{'='*60}")
         print(f"Facilities published: {facility_count}")
-        if not is_first_iteration:
-            print(f"Facilities skipped (unchanged): {facility_skipped}")
+        if first_publish_count > 0:
+            print(f"  - First time: {first_publish_count}")
+        if facility_count - first_publish_count > 0:
+            print(f"  - Updated (changed): {facility_count - first_publish_count}")
+        print(f"Facilities skipped (unchanged): {facility_skipped}")
         print(f"Market published: {market_count}")
         print(f"Total published: {facility_count + market_count}")
         print(f"{'='*60}")
