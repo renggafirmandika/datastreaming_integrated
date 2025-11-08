@@ -157,11 +157,14 @@ def publish_combined(facility_df, market_df):
                         should_publish = True
 
                 if should_publish:
+                    # Format timestamp without 'T' separator
+                    formatted_timestamp = str(row['timestamp']).replace('T', ' ')
+
                     payload = {
                         "facility_code": facility_code,
                         "power": current_power,
                         "emissions": current_emissions,
-                        "timestamp": timestamp_str
+                        "timestamp": formatted_timestamp
                     }
 
                     client.publish(FACILITY_TOPIC, json.dumps(payload), qos=1)
@@ -173,28 +176,32 @@ def publish_combined(facility_df, market_df):
                     }
 
                     if is_first_publish:
-                        print(f"[FIRST] Facility: {facility_code} @ {row['timestamp']} (power={current_power}, emissions={current_emissions})")
+                        print(f"[FIRST] Facility: {facility_code} @ {formatted_timestamp} (power={current_power}, emissions={current_emissions})")
                     else:
-                        print(f"[UPDATED] Facility: {facility_code} @ {row['timestamp']} (power={current_power}, emissions={current_emissions})")
+                        print(f"[UPDATED] Facility: {facility_code} @ {formatted_timestamp} (power={current_power}, emissions={current_emissions})")
                     facility_count += 1
                 else:
                     # Skipped - show what we're comparing
                     last_power = last_published_facility[facility_code]['power']
                     last_emissions = last_published_facility[facility_code]['emissions']
-                    print(f"[SKIPPED] Facility: {facility_code} @ {row['timestamp']} (current: power={current_power}, emissions={current_emissions} | previous: power={last_power}, emissions={last_emissions})")
+                    formatted_timestamp = str(row['timestamp']).replace('T', ' ')
+                    print(f"[SKIPPED] Facility: {facility_code} @ {formatted_timestamp} (current: power={current_power}, emissions={current_emissions} | previous: power={last_power}, emissions={last_emissions})")
                     facility_skipped += 1
 
             else:  # Market data - always publish
+                # Format timestamp without 'T' separator
+                formatted_timestamp = str(row['timestamp']).replace('T', ' ')
+
                 payload = {
                     "region": row['network_region'],
                     "price": float(row['price']) if pd.notna(row['price']) else None,
                     "demand_energy": float(row['demand_energy']) if pd.notna(row['demand_energy']) else None,
-                    "timestamp": str(row['timestamp'])
+                    "timestamp": formatted_timestamp
                 }
 
                 topic = f"{MARKET_TOPIC}/{row['network_region']}"
                 client.publish(topic, json.dumps(payload), qos=1, retain=True)
-                print(f"[PUBLISHED] Market: {row['network_region']} @ {row['timestamp']}")
+                print(f"[PUBLISHED] Market: {row['network_region']} @ {formatted_timestamp}")
                 market_count += 1
 
             total = facility_count + market_count
@@ -213,6 +220,7 @@ def publish_combined(facility_df, market_df):
         print(f"Facilities skipped (unchanged): {facility_skipped}")
         print(f"Market published: {market_count}")
         print(f"Total published: {facility_count + market_count}")
+        print(f"Total unique facilities tracked: {len(last_published_facility)}")
         print(f"{'='*60}")
 
         time.sleep(60)
