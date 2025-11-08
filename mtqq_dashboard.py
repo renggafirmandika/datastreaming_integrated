@@ -171,6 +171,25 @@ def start_mqtt_once():
     start_mqtt_once._started = True
     threading.Thread(target=_mqtt_loop, daemon=True).start()
 
+def reset_state():
+    """Reset all global state variables for a fresh start."""
+    global facilities_data, market_watermark, facility_watermark
+    global last_known_facility_values, facilities_updated_this_bucket, current_processing_bucket
+    global pending_facilities, facility_buckets, market_buckets
+
+    facilities_data.clear()
+    pending_facilities.clear()
+    facility_buckets.clear()
+    market_buckets.clear()
+    last_known_facility_values.clear()
+    facilities_updated_this_bucket.clear()
+
+    market_watermark = None
+    facility_watermark = None
+    current_processing_bucket = None
+
+    print("✓ Subscriber state reset to fresh start")
+
 def round_to_bucket(timestamp_str):
     ts = pd.to_datetime(timestamp_str)
     minutes = (ts.minute // TIME_BUCKET_MINUTES) * TIME_BUCKET_MINUTES
@@ -755,10 +774,13 @@ def update_map(_, view_mode, region_sel, fuel_sel, relayout, map_state):
 
 # Run app
 if __name__ == "__main__":
+    # Reset all state for fresh start
+    reset_state()
+
     # Load metadata once at startup
     print("Loading facility metadata from database...")
     facilities_metadata = get_data_from_db()
-    
+
     # Start MQTT connection
     start_mqtt_once()
     

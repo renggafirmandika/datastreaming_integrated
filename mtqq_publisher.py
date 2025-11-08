@@ -24,11 +24,27 @@ client = mqtt.Client(mqtt.CallbackAPIVersion.VERSION2)
 def initialise_mqtt_client():
     client.on_connect = on_connect
     try:
-        client.connect(BROKER, PORT, 60) 
+        client.connect(BROKER, PORT, 60)
         client.loop_start()
     except Exception as e:
         print(f"Error connecting to MQTT broker: {e}")
         sys.exit(1)
+
+def clear_retained_messages():
+    """Clear all retained messages from MQTT broker for a fresh start."""
+    print("\nClearing retained messages from broker...")
+    regions = ['NSW1', 'QLD1', 'VIC1', 'SA1', 'TAS1']
+    for region in regions:
+        topic = f"{MARKET_TOPIC}/{region}"
+        client.publish(topic, None, retain=True)
+        print(f"  ✓ Cleared: {topic}")
+
+    # Also clear facility topic (though it's not retained)
+    client.publish(FACILITY_TOPIC, None, retain=True)
+    print(f"  ✓ Cleared: {FACILITY_TOPIC}")
+
+    print("✓ All retained messages cleared\n")
+    time.sleep(1)  # Give broker time to process
 
 # load data for a specific day
 def load_day_data(df:pd.DataFrame, day_number:int):
@@ -244,6 +260,7 @@ def publish_via_mqtt_broker(fac_data:pd.DataFrame, mar_data:pd.DataFrame):
 
     try:
         initialise_mqtt_client()
+        clear_retained_messages()  # Clear old retained messages for fresh start
         publish_combined(facility_df, market_df)
     except KeyboardInterrupt:
         print("\n\nStopping publisher...")
