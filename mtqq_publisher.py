@@ -31,19 +31,15 @@ def initialise_mqtt_client():
         sys.exit(1)
 
 def clear_retained_messages():
-    """Clear all retained messages from MQTT broker for a fresh start."""
     print("\nClearing retained messages from broker...")
     regions = ['NSW1', 'QLD1', 'VIC1', 'SA1', 'TAS1']
     for region in regions:
         topic = f"{MARKET_TOPIC}/{region}"
         client.publish(topic, None, retain=True)
-        print(f"  ✓ Cleared: {topic}")
 
-    # Also clear facility topic (though it's not retained)
     client.publish(FACILITY_TOPIC, None, retain=True)
-    print(f"  ✓ Cleared: {FACILITY_TOPIC}")
 
-    print("✓ All retained messages cleared\n")
+    print("(V) All retained messages cleared\n")
     time.sleep(1)  # Give broker time to process
 
 # load data for a specific day

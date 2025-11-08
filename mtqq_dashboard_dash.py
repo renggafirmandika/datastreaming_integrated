@@ -183,7 +183,6 @@ def start_mqtt_once():
     threading.Thread(target=_mqtt_loop, daemon=True).start()
 
 def reset_state():
-    """Reset all global state variables for a fresh start."""
     global facilities_data, market_watermark, facility_watermark
     global last_known_facility_values, facilities_updated_this_bucket, current_processing_bucket
     global pending_facilities, facility_buckets, market_buckets
@@ -199,10 +198,7 @@ def reset_state():
     facility_watermark = None
     current_processing_bucket = None
 
-    print("✓ Subscriber state reset to fresh start")
-
 def stop_mqtt():
-    """Stop the MQTT client and background processing."""
     global mqtt_connected
     print("\nStopping MQTT subscriber...")
     mqtt_stop_flag.set()
@@ -210,7 +206,7 @@ def stop_mqtt():
     mqtt_connected = False
     start_mqtt_once._started = False
     reset_state()  # Reset state when stopping
-    print("✓ MQTT subscriber stopped")
+    print("(V) MQTT subscriber stopped")
     print("  You can now restart it by calling run_dashboard() again")
 
 def round_to_bucket(timestamp_str):
@@ -360,7 +356,7 @@ def integrate_data_sources():
             elif msg_timestamp < market_watermark - timedelta(seconds=WATERMARK_LAG_SECONDS):
                 # This is late data (arrived after watermark passed)
                 late_market_count += 1
-                print(f"⚠ Late market data detected: {region} @ {msg['timestamp']} (watermark: {market_watermark})")
+                print(f"(!) Late market data detected: {region} @ {msg['timestamp']} (watermark: {market_watermark})")
 
         except Exception as e:
             print(f"Error processing market data: {e}")
