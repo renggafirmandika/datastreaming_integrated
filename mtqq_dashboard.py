@@ -231,11 +231,7 @@ def integrate_data_sources():
     late_facility_count = 0
     forward_filled_count = 0
 
-    # Step 1: Process ALL market data first and update watermark
-    previous_watermark_bucket = None
-    if market_watermark:
-        previous_watermark_bucket = round_to_bucket(market_watermark.isoformat())
-
+    # Step 1: Process market data and update watermark incrementally
     while not market_queue.empty():
         try:
             msg = market_queue.get_nowait()
@@ -243,76 +239,78 @@ def integrate_data_sources():
             region = msg['region']
             msg_timestamp = pd.to_datetime(msg['timestamp'])
 
-            # Update market watermark
-            if market_watermark is None or msg_timestamp > market_watermark:
-                market_watermark = msg_timestamp
-            elif msg_timestamp < market_watermark - timedelta(seconds=WATERMARK_LAG_SECONDS):
-                # This is late data (arrived after watermark passed)
-                late_market_count += 1
-                print(f"⚠ Late market data detected: {region} @ {msg['timestamp']} (watermark: {market_watermark})")
+            # Check if this message advances watermark to a new bucket
+            previous_watermark_bucket = round_to_bucket(market_watermark.isoformat()) if market_watermark else None
+            new_bucket = round_to_bucket(msg_timestamp.isoformat())
 
+            # Store market data first
             market_buckets[bucket][region] = {
                 'price': msg['price'],
                 'demand_energy': msg['demand_energy'],
                 'timestamp': msg['timestamp']
             }
             market_processed += 1
+
+            # Update market watermark
+            if market_watermark is None or msg_timestamp > market_watermark:
+                market_watermark = msg_timestamp
+
+                # Check if we advanced to a new bucket - if so, forward-fill
+                if previous_watermark_bucket != new_bucket:
+                    # We're entering a new bucket - forward-fill facilities that didn't update
+                    if previous_watermark_bucket is not None and last_known_facility_values:
+                        for facility_code, last_values in last_known_facility_values.items():
+                            if facility_code not in facilities_updated_this_bucket and facility_code in facilities_metadata:
+                                # This facility didn't send update - forward-fill with last known values
+                                metadata = facilities_metadata[facility_code]
+                                fac_region = metadata['region']
+
+                                # Get market data for the NEW bucket
+                                market_data = market_buckets.get(new_bucket, {}).get(fac_region, {})
+
+                                # Create forward-filled record with NEW bucket timestamp
+                                integrated_record = {
+                                    # From last known values (unchanged)
+                                    'facility_code': facility_code,
+                                    'power': last_values['power'],
+                                    'emissions': last_values['emissions'],
+                                    'timestamp': new_bucket,  # Update to NEW bucket!
+                                    'time_bucket': new_bucket,
+
+                                    # From Database
+                                    'facility_name': metadata['facility_name'],
+                                    'network_region': fac_region,
+                                    'lat': metadata['lat'],
+                                    'lng': metadata['lng'],
+                                    'fuel_type': metadata['fuel_type'],
+
+                                    # From MQTT Market
+                                    'price': market_data.get('price'),
+                                    'demand_energy': market_data.get('demand_energy'),
+                                    'market_timestamp': market_data.get('timestamp'),
+
+                                    # Data quality
+                                    'has_market_data': bool(market_data),
+                                    'forward_filled': True  # Mark as forward-filled
+                                }
+
+                                facilities_data[facility_code] = integrated_record
+                                forward_filled_count += 1
+                                print(f"[FORWARD-FILL] {facility_code} @ {new_bucket} (power={last_values['power']}, emissions={last_values['emissions']})")
+
+                    # Reset for new bucket
+                    current_processing_bucket = new_bucket
+                    facilities_updated_this_bucket.clear()
+
+            elif msg_timestamp < market_watermark - timedelta(seconds=WATERMARK_LAG_SECONDS):
+                # This is late data (arrived after watermark passed)
+                late_market_count += 1
+                print(f"⚠ Late market data detected: {region} @ {msg['timestamp']} (watermark: {market_watermark})")
+
         except queue.Empty:
             break
         except Exception as e:
             print(f"Error processing market data: {e}")
-
-    # Step 1.5: Check if market watermark advanced to new bucket - if so, forward-fill
-    if market_watermark:
-        new_watermark_bucket = round_to_bucket(market_watermark.isoformat())
-
-        # If we've moved to a new bucket, perform forward-fill for facilities that didn't update
-        if previous_watermark_bucket != new_watermark_bucket:
-            # We're entering a new bucket - forward-fill for the bucket we just left
-            if previous_watermark_bucket is not None and last_known_facility_values:
-                # Forward-fill facilities that didn't send updates in the previous bucket
-                for facility_code, last_values in last_known_facility_values.items():
-                    if facility_code not in facilities_updated_this_bucket and facility_code in facilities_metadata:
-                        # This facility didn't send update - forward-fill with last known values
-                        metadata = facilities_metadata[facility_code]
-                        region = metadata['region']
-
-                        # Get market data for the NEW bucket (where we're advancing to)
-                        market_data = market_buckets.get(new_watermark_bucket, {}).get(region, {})
-
-                        # Create forward-filled record with NEW bucket timestamp
-                        integrated_record = {
-                            # From last known values (unchanged)
-                            'facility_code': facility_code,
-                            'power': last_values['power'],
-                            'emissions': last_values['emissions'],
-                            'timestamp': new_watermark_bucket,  # Update to NEW bucket!
-                            'time_bucket': new_watermark_bucket,
-
-                            # From Database
-                            'facility_name': metadata['facility_name'],
-                            'network_region': region,
-                            'lat': metadata['lat'],
-                            'lng': metadata['lng'],
-                            'fuel_type': metadata['fuel_type'],
-
-                            # From MQTT Market
-                            'price': market_data.get('price'),
-                            'demand_energy': market_data.get('demand_energy'),
-                            'market_timestamp': market_data.get('timestamp'),
-
-                            # Data quality
-                            'has_market_data': bool(market_data),
-                            'forward_filled': True  # Mark as forward-filled
-                        }
-
-                        facilities_data[facility_code] = integrated_record
-                        forward_filled_count += 1
-                        print(f"[FORWARD-FILL] {facility_code} @ {new_watermark_bucket} (power={last_values['power']}, emissions={last_values['emissions']})")
-
-            # Reset for new bucket
-            current_processing_bucket = new_watermark_bucket
-            facilities_updated_this_bucket.clear()
 
     # Step 2: If market data was received, retry pending facilities
     if market_processed > 0 and pending_facilities:
