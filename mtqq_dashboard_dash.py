@@ -182,14 +182,36 @@ def start_mqtt_once():
     start_mqtt_once._started = True
     threading.Thread(target=_mqtt_loop, daemon=True).start()
 
+def reset_state():
+    """Reset all global state variables for a fresh start."""
+    global facilities_data, market_watermark, facility_watermark
+    global last_known_facility_values, facilities_updated_this_bucket, current_processing_bucket
+    global pending_facilities, facility_buckets, market_buckets
+
+    facilities_data.clear()
+    pending_facilities.clear()
+    facility_buckets.clear()
+    market_buckets.clear()
+    last_known_facility_values.clear()
+    facilities_updated_this_bucket.clear()
+
+    market_watermark = None
+    facility_watermark = None
+    current_processing_bucket = None
+
+    print("✓ Subscriber state reset to fresh start")
+
 def stop_mqtt():
+    """Stop the MQTT client and background processing."""
     global mqtt_connected
     print("\nStopping MQTT subscriber...")
     mqtt_stop_flag.set()
     processing_stop_flag.set()
     mqtt_connected = False
     start_mqtt_once._started = False
-    print("(V) MQTT subscriber stopped")
+    reset_state()  # Reset state when stopping
+    print("✓ MQTT subscriber stopped")
+    print("  You can now restart it by calling run_dashboard() again")
 
 def round_to_bucket(timestamp_str):
     ts = pd.to_datetime(timestamp_str)
@@ -835,6 +857,9 @@ def update_map(_, view_mode, region_sel, fuel_sel, relayout, map_state):
 # Function to run dashboard 
 def run_dashboard(port=8052, jupyter_mode=False):
     global facilities_metadata
+
+    # Reset all state for fresh start
+    reset_state()
 
     mqtt_stop_flag.clear()
     processing_stop_flag.clear()
