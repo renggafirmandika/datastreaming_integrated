@@ -36,10 +36,9 @@ pending_facilities = []
 MAX_PENDING_AGE_SECONDS = 30  # Maximum time to hold pending data
 
 # Watermark tracking for late data handling
-# Match the join window (TIME_BUCKET_MINUTES * 2) to allow data from previous bucket
-WATERMARK_LAG_SECONDS = TIME_BUCKET_MINUTES * 60 * 2  # 10 minutes (2 buckets)
-market_watermark = None  # Track the latest market timestamp
-facility_watermark = None  # Track the latest facility timestamp
+WATERMARK_LAG_SECONDS = TIME_BUCKET_MINUTES * 60 * 2  # 10 mins
+market_watermark = None  
+facility_watermark = None  
 
 # Track last known values for each facility (for forward-fill)
 last_known_facility_values = {}  # {facility_code: {'power': ..., 'emissions': ..., 'timestamp': ...}}
@@ -74,7 +73,6 @@ def normalize_fuel(val) -> str:
     return FUEL_CANONICALS.get(key, s)
 
 def clean_region_name(region) -> str:
-    """Remove trailing '1' from region names for display (NSW1 -> NSW)."""
     if region and isinstance(region, str) and region.endswith('1'):
         return region[:-1]
     return region
@@ -95,7 +93,7 @@ def get_data_from_db():
 
     metadata = facilities_metadata_df.set_index('facility_code').to_dict('index')
 
-    print(f"✓ Loaded {len(metadata)} facilities from Database")
+    print(f"(V) Loaded {len(metadata)} facilities from Database")
     
     con.close()
 
@@ -121,14 +119,12 @@ FUEL_COLORS = {
 }
 
 def fmt2(x):
-    """Format numbers to 2 decimals."""
     try:
         return f"{float(x):.2f}"
     except Exception:
         return "0.00"
 
 def parse_ts(ts):
-    """Parse timestamp safely; return very small datetime if invalid."""
     try:
         return datetime.fromisoformat(str(ts))
     except Exception:
@@ -136,7 +132,6 @@ def parse_ts(ts):
 
 # MQTT callbacks
 def on_connect(client, userdata, flags, reason_code, properties=None):
-    """Subscribe to topic once connected."""
     global mqtt_connected
     mqtt_connected = (reason_code == 0)
     if mqtt_connected:
@@ -144,14 +139,13 @@ def on_connect(client, userdata, flags, reason_code, properties=None):
             (FACILITY_TOPIC, 1),
             (f"{MARKET_TOPIC}/#", 1)
         ])
-        print(f"✓ Successfully connected to MQTT broker and subscribed to:")
+        print(f"(V) Successfully connected to MQTT broker and subscribed to:")
         print(f"   - {FACILITY_TOPIC}")
         print(f"   - {MARKET_TOPIC}/#\n")
     else:
-        print(f"✗ Failed to connect. rc={reason_code}")
+        print(f"(X) Failed to connect. rc={reason_code}")
 
 def on_message(client, userdata, message):
-    """Handle incoming MQTT messages and store latest reading per facility."""
     try:
         payload = json.loads(message.payload.decode())
         if message.topic == FACILITY_TOPIC:
@@ -180,25 +174,22 @@ def _mqtt_loop():
         mqtt_client.loop(timeout=1.0)
 
     mqtt_client.disconnect()
-    print("✓ MQTT client disconnected")
+    print("(V) MQTT client disconnected")
 
 def start_mqtt_once():
-    """Ensure MQTT starts only once."""
     if getattr(start_mqtt_once, "_started", False):
         return
     start_mqtt_once._started = True
     threading.Thread(target=_mqtt_loop, daemon=True).start()
 
 def stop_mqtt():
-    """Stop the MQTT client and background processing."""
     global mqtt_connected
     print("\nStopping MQTT subscriber...")
     mqtt_stop_flag.set()
     processing_stop_flag.set()
     mqtt_connected = False
     start_mqtt_once._started = False
-    print("✓ MQTT subscriber stopped")
-    print("  You can now restart it by calling run_dashboard() again")
+    print("(V) MQTT subscriber stopped")
 
 def round_to_bucket(timestamp_str):
     ts = pd.to_datetime(timestamp_str)
@@ -207,7 +198,6 @@ def round_to_bucket(timestamp_str):
     return bucket.isoformat()
 
 def process_facility_message(msg, metadata):
-    """Process a single facility message and integrate with market data."""
     facility_code = msg['facility_code']
     region = metadata['region']
     bucket = round_to_bucket(msg['timestamp'])
@@ -247,7 +237,6 @@ def process_facility_message(msg, metadata):
     return integrated_record, bool(market_data)
 
 def integrate_data_sources():
-    """Process queued MQTT messages and integrate with database metadata."""
     global facilities_data, facilities_metadata, pending_facilities
     global market_watermark, facility_watermark
     global last_known_facility_values, facilities_updated_this_bucket, current_processing_bucket
@@ -272,13 +261,11 @@ def integrate_data_sources():
             region = msg['region']
             msg_timestamp = pd.to_datetime(msg['timestamp'])
 
-            # Update market watermark
             if market_watermark is None or msg_timestamp > market_watermark:
                 market_watermark = msg_timestamp
             elif msg_timestamp < market_watermark - timedelta(seconds=WATERMARK_LAG_SECONDS):
-                # This is late data (arrived after watermark passed)
                 late_market_count += 1
-                print(f"⚠ Late market data detected: {region} @ {msg['timestamp']} (watermark: {market_watermark})")
+                print(f"(!) Late market data detected: {region} @ {msg['timestamp']} (watermark: {market_watermark})")
 
             market_buckets[bucket][region] = {
                 'price': msg['price'],
@@ -351,10 +338,8 @@ def integrate_data_sources():
             metadata = pending_item['metadata']
             received_time = pending_item['received_time']
 
-            # Check age - drop if too old
             age = time.time() - received_time
             if age > MAX_PENDING_AGE_SECONDS:
-                # Process anyway, even without market data
                 record, _ = process_facility_message(msg, metadata)
                 facility_code = msg['facility_code']
                 facilities_data[facility_code] = record
@@ -369,7 +354,6 @@ def integrate_data_sources():
                 }
                 continue
 
-            # Try to process again
             record, has_market = process_facility_message(msg, metadata)
 
             if has_market:
@@ -387,42 +371,33 @@ def integrate_data_sources():
                     'timestamp': msg['timestamp']
                 }
             else:
-                # Still no market data, keep pending
                 still_pending.append(pending_item)
 
         pending_facilities = still_pending
 
-    # Step 3: Process NEW facility data with watermark tracking
     while not facility_queue.empty():
         try:
             msg = facility_queue.get_nowait()
             facility_code = msg['facility_code']
             msg_timestamp = pd.to_datetime(msg['timestamp'])
 
-            # Update facility watermark (for monitoring)
             if facility_watermark is None or msg_timestamp > facility_watermark:
                 facility_watermark = msg_timestamp
             elif msg_timestamp < facility_watermark - timedelta(seconds=WATERMARK_LAG_SECONDS):
-                # This is late data (arrived after watermark passed)
                 late_facility_count += 1
-                print(f"⚠ Late facility data detected: {facility_code} @ {msg['timestamp']} (watermark: {facility_watermark})")
+                print(f"(!) Late facility data detected: {facility_code} @ {msg['timestamp']} (watermark: {facility_watermark})")
 
-            # Check if we have metadata for this facility
             if facility_code not in facilities_metadata:
                 continue
 
             metadata = facilities_metadata[facility_code]
 
-            # Try to process with current market data
             record, has_market = process_facility_message(msg, metadata)
 
-            # Watermark-based decision: Use MARKET watermark to decide if we should wait
-            # If market stream has moved past this timestamp, process immediately (don't wait)
             market_has_passed = (market_watermark is not None and
                                msg_timestamp < market_watermark - timedelta(seconds=WATERMARK_LAG_SECONDS))
 
             if has_market or market_has_passed:
-                # Has market data OR market stream has moved past this timestamp - process immediately
                 facilities_data[facility_code] = record
                 facility_processed += 1
 
@@ -436,7 +411,6 @@ def integrate_data_sources():
                     'timestamp': msg['timestamp']
                 }
             else:
-                # No market data yet and market stream hasn't passed this timestamp - add to pending queue
                 pending_facilities.append({
                     'msg': msg,
                     'metadata': metadata,
@@ -475,12 +449,11 @@ def integrate_data_sources():
         if watermark_info:
             status_parts.append(' | '.join(watermark_info))
 
-        print(f"✓ {' | '.join(status_parts)}")
+        print(f"(V) {' | '.join(status_parts)}")
 
     return facility_processed, market_processed
 
 def process_queues_continuously():
-    """Background thread to continuously process MQTT queues."""
     while not processing_stop_flag.is_set():
         try:
             integrate_data_sources()
@@ -488,7 +461,7 @@ def process_queues_continuously():
         except Exception as e:
             print(f"Error in queue processing: {e}")
             time.sleep(5)
-    print("✓ Background data processor stopped")
+    print("(V) Background data processor stopped")
 
 # Dash App
 app = Dash(__name__)
@@ -846,48 +819,33 @@ def update_map(_, view_mode, region_sel, fuel_sel, relayout, map_state):
     return fig, stats, map_state
 
 
-# Function to run dashboard (for notebook compatibility)
+# Function to run dashboard 
 def run_dashboard(port=8052, jupyter_mode=False):
-    """
-    Run the dashboard application.
-
-    Parameters:
-    - port: Port to run on (default: 8052)
-    - jupyter_mode: If True, runs in Jupyter-compatible mode with 127.0.0.1
-
-    To stop the dashboard: call stop_mqtt()
-    """
     global facilities_metadata
 
-    # Reset stop flags if restarting
     mqtt_stop_flag.clear()
     processing_stop_flag.clear()
 
-    # Load metadata once at startup
     print("Loading facility metadata from database...")
     facilities_metadata = get_data_from_db()
 
-    # Start MQTT connection
     start_mqtt_once()
 
-    # Start background queue processor
     print("Starting background data processor...")
     threading.Thread(target=process_queues_continuously, daemon=True).start()
 
-    # Use localhost for Jupyter (Windows compatibility), 0.0.0.0 for standalone
     if jupyter_mode:
         host = "127.0.0.1"
-        print(f"\n✓ Dashboard starting on http://localhost:{port}\n")
+        print(f"\n(V) Dashboard starting on http://localhost:{port}\n")
         print(f"   To stop the subscriber: dashboard.stop_mqtt()\n")
         try:
             app.run(host=host, port=port, debug=False, use_reloader=False, jupyter_mode='inline')
         except Exception as e:
-            # Suppress ContextVar errors in Jupyter
             if "ContextVar" not in str(e):
                 print(f"Dashboard error: {e}")
     else:
         host = "0.0.0.0"
-        print(f"\n✓ Dashboard starting on http://0.0.0.0:{port}\n")
+        print(f"\n(V) Dashboard starting on http://0.0.0.0:{port}\n")
         app.run(host=host, port=port, debug=False, use_reloader=False)
 
 # Run app
