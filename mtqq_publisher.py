@@ -117,6 +117,7 @@ def publish_combined(facility_df, market_df):
     all_data = all_data.sort_values(['timestamp', 'priority']).reset_index(drop=True)
 
     # Track last published values for change detection
+    # Key: (facility_code, timestamp), Value: {power, emissions}
     last_published_facility = {}
 
     iteration = 0
@@ -138,21 +139,25 @@ def publish_combined(facility_df, market_df):
         for idx, row in all_data.iterrows():
             if row['record_type'] == 'facility':
                 facility_code = row['facility_code']
+                timestamp_str = str(row['timestamp'])
                 current_power = float(row['power']) if pd.notna(row['power']) else None
                 current_emissions = float(row['emissions']) if pd.notna(row['emissions']) else None
+
+                # Create unique key for this facility-timestamp combination
+                facility_ts_key = (facility_code, timestamp_str)
 
                 # Check if this is a new facility or values have changed
                 should_publish = is_first_iteration
 
-                if not is_first_iteration and facility_code in last_published_facility:
-                    last_power = last_published_facility[facility_code]['power']
-                    last_emissions = last_published_facility[facility_code]['emissions']
+                if not is_first_iteration and facility_ts_key in last_published_facility:
+                    last_power = last_published_facility[facility_ts_key]['power']
+                    last_emissions = last_published_facility[facility_ts_key]['emissions']
 
-                    # Publish if power or emissions changed
+                    # Publish if power or emissions changed from last iteration's same timestamp
                     if current_power != last_power or current_emissions != last_emissions:
                         should_publish = True
                 elif not is_first_iteration:
-                    # New facility appearing after first iteration
+                    # New facility-timestamp appearing after first iteration
                     should_publish = True
 
                 if should_publish:
@@ -160,13 +165,13 @@ def publish_combined(facility_df, market_df):
                         "facility_code": facility_code,
                         "power": current_power,
                         "emissions": current_emissions,
-                        "timestamp": str(row['timestamp'])
+                        "timestamp": timestamp_str
                     }
 
                     client.publish(FACILITY_TOPIC, json.dumps(payload), qos=1)
 
-                    # Update tracking
-                    last_published_facility[facility_code] = {
+                    # Update tracking with facility-timestamp key
+                    last_published_facility[facility_ts_key] = {
                         'power': current_power,
                         'emissions': current_emissions
                     }
