@@ -175,7 +175,8 @@ def round_to_bucket(timestamp_str):
     ts = pd.to_datetime(timestamp_str)
     minutes = (ts.minute // TIME_BUCKET_MINUTES) * TIME_BUCKET_MINUTES
     bucket = ts.replace(minute=minutes, second=0, microsecond=0)
-    return bucket.isoformat()
+    # Return timestamp without 'T' separator
+    return str(bucket).replace('T', ' ')
 
 def process_facility_message(msg, metadata):
     """Process a single facility message and integrate with market data."""
