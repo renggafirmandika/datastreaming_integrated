@@ -249,10 +249,24 @@ def integrate_data_sources():
     late_facility_count = 0
     forward_filled_count = 0
 
-    # Step 1: Process market data and update watermark incrementally
+    # Step 1: Collect and sort market messages by timestamp, then process incrementally
+    market_messages = []
     while not market_queue.empty():
         try:
             msg = market_queue.get_nowait()
+            market_messages.append(msg)
+        except queue.Empty:
+            break
+        except Exception as e:
+            print(f"Error collecting market data: {e}")
+
+    # Sort messages by timestamp to ensure chronological processing
+    if market_messages:
+        market_messages.sort(key=lambda m: pd.to_datetime(m['timestamp']))
+
+    # Process market messages in chronological order
+    for msg in market_messages:
+        try:
             bucket = round_to_bucket(msg['timestamp'])
             region = msg['region']
             msg_timestamp = pd.to_datetime(msg['timestamp'])
@@ -325,8 +339,6 @@ def integrate_data_sources():
                 late_market_count += 1
                 print(f"⚠ Late market data detected: {region} @ {msg['timestamp']} (watermark: {market_watermark})")
 
-        except queue.Empty:
-            break
         except Exception as e:
             print(f"Error processing market data: {e}")
 
