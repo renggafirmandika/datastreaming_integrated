@@ -311,9 +311,21 @@ def integrate_data_sources():
                     # We're entering a new bucket - forward-fill facilities that didn't update
                     if previous_watermark_bucket is not None and last_known_facility_values:
                         for facility_code, last_values in last_known_facility_values.items():
-                            if facility_code not in facilities_updated_this_bucket and facility_code in facilities_metadata:
+                            if facility_code not in facilities_updated_this_bucket:
                                 # This facility didn't send update - forward-fill with last known values
-                                metadata = facilities_metadata[facility_code]
+
+                                # Get metadata or use placeholder
+                                if facility_code in facilities_metadata:
+                                    metadata = facilities_metadata[facility_code]
+                                else:
+                                    metadata = {
+                                        'facility_name': facility_code,
+                                        'region': 'UNKNOWN',
+                                        'lat': None,
+                                        'lng': None,
+                                        'fuel_type': 'Unknown'
+                                    }
+
                                 fac_region = metadata['region']
 
                                 # Get market data for the NEW bucket
@@ -418,10 +430,20 @@ def integrate_data_sources():
                 late_facility_count += 1
                 print(f"(!) Late facility data detected: {facility_code} @ {msg['timestamp']} (watermark: {facility_watermark})")
 
-            if facility_code not in facilities_metadata:
-                continue
-
-            metadata = facilities_metadata[facility_code]
+            # Get metadata or use placeholder for unknown facilities
+            if facility_code in facilities_metadata:
+                metadata = facilities_metadata[facility_code]
+            else:
+                # Facility not in database - use placeholder metadata
+                # This allows processing all facilities from CSV even if not in DB mapping
+                metadata = {
+                    'facility_name': facility_code,  # Use code as name
+                    'region': 'UNKNOWN',
+                    'lat': None,
+                    'lng': None,
+                    'fuel_type': 'Unknown'
+                }
+                print(f"⚠ Facility {facility_code} not in database - using placeholder metadata")
 
             record, has_market = process_facility_message(msg, metadata)
 
