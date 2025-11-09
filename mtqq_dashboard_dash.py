@@ -31,6 +31,9 @@ facilities_data = {}
 facilities_metadata = {}
 mqtt_connected = False
 
+# Track facilities missing from database metadata
+missing_metadata_facilities = set()
+
 # Pending facility messages waiting for market data
 pending_facilities = []
 MAX_PENDING_AGE_SECONDS = 30  # Maximum time to hold pending data
@@ -200,7 +203,7 @@ def start_mqtt_once():
 def reset_state():
     global facilities_data, market_watermark, facility_watermark
     global last_known_facility_values, facilities_updated_this_bucket, current_processing_bucket
-    global pending_facilities, facility_buckets, market_buckets
+    global pending_facilities, facility_buckets, market_buckets, missing_metadata_facilities
 
     facilities_data.clear()
     pending_facilities.clear()
@@ -208,6 +211,7 @@ def reset_state():
     market_buckets.clear()
     last_known_facility_values.clear()
     facilities_updated_this_bucket.clear()
+    missing_metadata_facilities.clear()
 
     market_watermark = None
     facility_watermark = None
@@ -333,6 +337,8 @@ def integrate_data_sources():
                                 if facility_code in facilities_metadata:
                                     metadata = facilities_metadata[facility_code]
                                 else:
+                                    # Track missing (already warned during initial message)
+                                    missing_metadata_facilities.add(facility_code)
                                     metadata = {
                                         'facility_name': facility_code,
                                         'region': 'UNKNOWN',
@@ -464,8 +470,12 @@ def integrate_data_sources():
                     'lng': None,
                     'fuel_type': 'Unknown'
                 }
-                print(f"⚠️  WARNING: Facility '{facility_code}' not in database metadata (loaded {len(facilities_metadata)} facilities)")
-                print(f"   This facility will NOT match market data (region='UNKNOWN')")
+                # Track missing facilities (only warn once per facility)
+                if facility_code not in missing_metadata_facilities:
+                    missing_metadata_facilities.add(facility_code)
+                    print(f"⚠️  MISSING METADATA: '{facility_code}' not found in database ({len(facilities_metadata)} facilities loaded)")
+                    print(f"   → Will use placeholder: region='UNKNOWN', lat=None, lng=None")
+                    print(f"   → Will NOT match market data or appear on map")
 
             record, has_market = process_facility_message(msg, metadata)
 
@@ -515,6 +525,10 @@ def integrate_data_sources():
             status_parts.append(f"late facility: {late_facility_count}")
         status_parts.append(f"Total facilities: {len(facilities_data)}")
 
+        # Warn about missing metadata
+        if len(missing_metadata_facilities) > 0:
+            status_parts.append(f"⚠️  MISSING METADATA: {len(missing_metadata_facilities)} facilities")
+
         # Show watermark timestamps
         watermark_info = []
         if market_watermark:
@@ -525,6 +539,20 @@ def integrate_data_sources():
             status_parts.append(' | '.join(watermark_info))
 
         print(f"(V) {' | '.join(status_parts)}")
+
+        # Periodically show which facilities are missing (every ~20 status lines)
+        if len(missing_metadata_facilities) > 0 and facility_processed > 0:
+            # Use a simple counter based on total facilities processed
+            if len(facilities_data) % 100 < 10:  # Show occasionally
+                print(f"   📋 Facilities missing from database metadata ({len(missing_metadata_facilities)} total):")
+                sorted_missing = sorted(list(missing_metadata_facilities))
+                if len(sorted_missing) <= 10:
+                    for code in sorted_missing:
+                        print(f"      - {code}")
+                else:
+                    for code in sorted_missing[:10]:
+                        print(f"      - {code}")
+                    print(f"      ... and {len(sorted_missing) - 10} more")
 
     return facility_processed, market_processed
 
