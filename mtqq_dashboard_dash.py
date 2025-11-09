@@ -373,8 +373,8 @@ def integrate_data_sources():
         except Exception as e:
             print(f"Error processing market data: {e}")
 
-    # Step 2: If market data was received, retry pending facilities
-    if market_processed > 0 and pending_facilities:
+    # Step 2: Process pending facilities (check timeouts and retry with new market data)
+    if pending_facilities:
         still_pending = []
         for pending_item in pending_facilities:
             msg = pending_item['msg']
@@ -383,6 +383,7 @@ def integrate_data_sources():
 
             age = time.time() - received_time
             if age > MAX_PENDING_AGE_SECONDS:
+                # Timeout exceeded - force publish even without market data
                 record, _ = process_facility_message(msg, metadata)
                 facility_code = msg['facility_code']
                 facilities_data[facility_code] = record
@@ -395,26 +396,31 @@ def integrate_data_sources():
                     'emissions': msg['emissions'],
                     'timestamp': msg['timestamp']
                 }
+                print(f"[TIMEOUT] {facility_code} released after {age:.1f}s (no market data)")
                 continue
 
-            record, has_market = process_facility_message(msg, metadata)
+            # Only retry matching if new market data arrived
+            if market_processed > 0:
+                record, has_market = process_facility_message(msg, metadata)
 
-            if has_market:
-                # Market data now available!
-                facility_code = msg['facility_code']
-                facilities_data[facility_code] = record
-                facility_processed += 1
-                pending_resolved += 1
+                if has_market:
+                    # Market data now available!
+                    facility_code = msg['facility_code']
+                    facilities_data[facility_code] = record
+                    facility_processed += 1
+                    pending_resolved += 1
 
-                # Track update and last known values
-                facilities_updated_this_bucket.add(facility_code)
-                last_known_facility_values[facility_code] = {
-                    'power': msg['power'],
-                    'emissions': msg['emissions'],
-                    'timestamp': msg['timestamp']
-                }
-            else:
-                still_pending.append(pending_item)
+                    # Track update and last known values
+                    facilities_updated_this_bucket.add(facility_code)
+                    last_known_facility_values[facility_code] = {
+                        'power': msg['power'],
+                        'emissions': msg['emissions'],
+                        'timestamp': msg['timestamp']
+                    }
+                    continue
+
+            # Still pending
+            still_pending.append(pending_item)
 
         pending_facilities = still_pending
 
