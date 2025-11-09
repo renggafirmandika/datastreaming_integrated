@@ -128,16 +128,16 @@ def publish_combined(facility_df, market_df):
     # Sort by timestamp first, then by priority (market before facility)
     all_data = all_data.sort_values(['timestamp', 'priority']).reset_index(drop=True)
 
-    # Track last published values for change detection
-    # Key: facility_code, Value: {power, emissions}
-    last_published_facility = {}
-
     iteration = 0
 
     while True:
         iteration += 1
 
         print(f"\n[ITERATION {iteration}] Publishing data stream...")
+
+        # Reset tracking for each iteration to ensure all facilities are published
+        # This allows late-joining subscribers to receive complete initial state
+        last_published_facility = {}
 
         facility_count = 0
         facility_skipped = 0
