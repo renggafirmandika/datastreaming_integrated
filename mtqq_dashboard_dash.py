@@ -731,17 +731,23 @@ def update_map(_, view_mode, region_sel, fuel_sel, relayout, map_state):
         return fig, stats, map_state
 
     # Determine latest price/demand per region
+    # Only consider facilities that have market data (price not None)
     latest_by_region = {}
     for r in snap.values():
         reg = r.get("network_region")
         if not reg:
             continue
+
+        # Skip facilities without market data for regional price calculation
+        if r.get("price") is None or r.get("demand_energy") is None:
+            continue
+
         ts = parse_ts(r.get("timestamp"))
         prev = latest_by_region.get(reg)
         if (prev is None) or (ts > prev["ts"]):
             latest_by_region[reg] = {
-                "price": r.get("price") or 0.0,
-                "demand": r.get("demand_energy") or 0.0,
+                "price": r.get("price"),
+                "demand": r.get("demand_energy"),
                 "ts": ts,
                 "display_name": clean_region_name(reg)
             }
