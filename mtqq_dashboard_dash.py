@@ -238,6 +238,13 @@ def process_facility_message(msg, metadata):
     # Try to find matching market data
     market_data = market_buckets.get(bucket, {}).get(region, {})
 
+    # Debug: Log facility market lookup (only for first few)
+    if len(facilities_data) < 10:
+        available_regions = list(market_buckets.get(bucket, {}).keys())
+        print(f"🔍 FACILITY LOOKUP: code={facility_code}, region='{region}', bucket={bucket}")
+        print(f"   Available regions in bucket: {available_regions}")
+        print(f"   Match found: {bool(market_data)}, price={market_data.get('price') if market_data else 'N/A'}")
+
     if not market_data:
         prev_bucket = (pd.to_datetime(bucket) -
                       timedelta(minutes=TIME_BUCKET_MINUTES)).isoformat()
@@ -313,6 +320,10 @@ def integrate_data_sources():
                 'timestamp': msg['timestamp']
             }
             market_processed += 1
+
+            # Debug: Log market data storage
+            if market_processed <= 10:  # Only log first 10
+                print(f"📊 MARKET STORED: bucket={bucket}, region='{region}', price={msg['price']}, demand={msg['demand_energy']}")
 
             # Update market watermark
             if market_watermark is None or msg_timestamp > market_watermark:
