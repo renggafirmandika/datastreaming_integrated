@@ -81,7 +81,7 @@ def get_data_from_db():
     con = duckdb.connect("energy_dw.duckdb", read_only=True)
 
     facilities_metadata_df = con.execute("""
-        SELECT 
+        SELECT
             facility_code,
             facility_name,
             network_region as region,
@@ -91,10 +91,25 @@ def get_data_from_db():
         FROM facility_opennem_mapping
     """).df()
 
+    print(f"\n📊 Database Query Results:")
+    print(f"   Total rows fetched: {len(facilities_metadata_df)}")
+    print(f"   Unique facility_codes: {facilities_metadata_df['facility_code'].nunique()}")
+    print(f"   NULL facility_codes: {facilities_metadata_df['facility_code'].isna().sum()}")
+    print(f"   Duplicate facility_codes: {facilities_metadata_df['facility_code'].duplicated().sum()}")
+
+    # Check for issues before indexing
+    if facilities_metadata_df['facility_code'].isna().any():
+        print(f"   ⚠️  WARNING: {facilities_metadata_df['facility_code'].isna().sum()} rows have NULL facility_code (will be dropped)")
+
+    if facilities_metadata_df['facility_code'].duplicated().any():
+        dupes = facilities_metadata_df[facilities_metadata_df['facility_code'].duplicated(keep=False)]['facility_code'].unique()
+        print(f"   ⚠️  WARNING: Duplicate facility_codes found: {dupes[:5]}")
+
     metadata = facilities_metadata_df.set_index('facility_code').to_dict('index')
 
-    print(f"(V) Loaded {len(metadata)} facilities from Database")
-    
+    print(f"   Final metadata dictionary: {len(metadata)} facilities")
+    print(f"   Sample facility codes: {list(metadata.keys())[:5]}")
+
     con.close()
 
     return metadata
@@ -449,7 +464,8 @@ def integrate_data_sources():
                     'lng': None,
                     'fuel_type': 'Unknown'
                 }
-                print(f"⚠ Facility {facility_code} not in database - using placeholder metadata")
+                print(f"⚠️  WARNING: Facility '{facility_code}' not in database metadata (loaded {len(facilities_metadata)} facilities)")
+                print(f"   This facility will NOT match market data (region='UNKNOWN')")
 
             record, has_market = process_facility_message(msg, metadata)
 
