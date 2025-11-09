@@ -34,6 +34,9 @@ mqtt_connected = False
 # Track facilities missing from database metadata
 missing_metadata_facilities = set()
 
+# Track all unique facility codes ever received from MQTT
+all_received_facilities = set()
+
 # Watermark tracking for late data handling
 WATERMARK_LAG_SECONDS = TIME_BUCKET_MINUTES * 60 * 2  # 10 mins
 market_watermark = None  
@@ -199,7 +202,7 @@ def start_mqtt_once():
 def reset_state():
     global facilities_data, market_watermark, facility_watermark
     global last_known_facility_values, facilities_updated_this_bucket, current_processing_bucket
-    global facility_buckets, market_buckets, missing_metadata_facilities
+    global facility_buckets, market_buckets, missing_metadata_facilities, all_received_facilities
 
     facilities_data.clear()
     facility_buckets.clear()
@@ -207,6 +210,7 @@ def reset_state():
     last_known_facility_values.clear()
     facilities_updated_this_bucket.clear()
     missing_metadata_facilities.clear()
+    all_received_facilities.clear()
 
     market_watermark = None
     facility_watermark = None
@@ -405,6 +409,9 @@ def integrate_data_sources():
             facility_code = msg['facility_code']
             msg_timestamp = pd.to_datetime(msg['timestamp'])
 
+            # Track all unique facilities received
+            all_received_facilities.add(facility_code)
+
             if facility_watermark is None or msg_timestamp > facility_watermark:
                 facility_watermark = msg_timestamp
             elif msg_timestamp < facility_watermark - timedelta(seconds=WATERMARK_LAG_SECONDS):
@@ -464,6 +471,10 @@ def integrate_data_sources():
             status_parts.append(f"late facility: {late_facility_count}")
         status_parts.append(f"Total facilities: {len(facilities_data)}")
 
+        # Show received vs stored discrepancy
+        if len(all_received_facilities) != len(facilities_data):
+            status_parts.append(f"⚠️  Received {len(all_received_facilities)} unique, stored {len(facilities_data)}")
+
         # Warn about missing metadata
         if len(missing_metadata_facilities) > 0:
             status_parts.append(f"⚠️  MISSING METADATA: {len(missing_metadata_facilities)} facilities")
@@ -479,10 +490,10 @@ def integrate_data_sources():
 
         print(f"(V) {' | '.join(status_parts)}")
 
-        # Periodically show which facilities are missing (every ~20 status lines)
-        if len(missing_metadata_facilities) > 0 and facility_processed > 0:
-            # Use a simple counter based on total facilities processed
-            if len(facilities_data) % 100 < 10:  # Show occasionally
+        # Periodically show diagnostics
+        if facility_processed > 0 and len(facilities_data) > 100:
+            # Show missing metadata facilities
+            if len(missing_metadata_facilities) > 0 and len(facilities_data) % 100 < 10:
                 print(f"   📋 Facilities missing from database metadata ({len(missing_metadata_facilities)} total):")
                 sorted_missing = sorted(list(missing_metadata_facilities))
                 if len(sorted_missing) <= 10:
@@ -492,6 +503,20 @@ def integrate_data_sources():
                     for code in sorted_missing[:10]:
                         print(f"      - {code}")
                     print(f"      ... and {len(sorted_missing) - 10} more")
+
+            # Show received but not stored (if discrepancy exists)
+            if len(all_received_facilities) != len(facilities_data) and len(facilities_data) % 100 < 10:
+                received_not_stored = all_received_facilities - set(facilities_data.keys())
+                if received_not_stored:
+                    print(f"   ⚠️  Facilities received but NOT in facilities_data ({len(received_not_stored)} total):")
+                    sorted_missing = sorted(list(received_not_stored))
+                    if len(sorted_missing) <= 10:
+                        for code in sorted_missing:
+                            print(f"      - {code}")
+                    else:
+                        for code in sorted_missing[:10]:
+                            print(f"      - {code}")
+                        print(f"      ... and {len(sorted_missing) - 10} more")
 
     return facility_processed, market_processed
 
