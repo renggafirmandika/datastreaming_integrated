@@ -34,10 +34,6 @@ mqtt_connected = False
 # Track facilities missing from database metadata
 missing_metadata_facilities = set()
 
-# Pending facility messages waiting for market data
-pending_facilities = []
-MAX_PENDING_AGE_SECONDS = 30  # Maximum time to hold pending data
-
 # Watermark tracking for late data handling
 WATERMARK_LAG_SECONDS = TIME_BUCKET_MINUTES * 60 * 2  # 10 mins
 market_watermark = None  
@@ -203,10 +199,9 @@ def start_mqtt_once():
 def reset_state():
     global facilities_data, market_watermark, facility_watermark
     global last_known_facility_values, facilities_updated_this_bucket, current_processing_bucket
-    global pending_facilities, facility_buckets, market_buckets, missing_metadata_facilities
+    global facility_buckets, market_buckets, missing_metadata_facilities
 
     facilities_data.clear()
-    pending_facilities.clear()
     facility_buckets.clear()
     market_buckets.clear()
     last_known_facility_values.clear()
@@ -275,14 +270,12 @@ def process_facility_message(msg, metadata):
     return integrated_record, bool(market_data)
 
 def integrate_data_sources():
-    global facilities_data, facilities_metadata, pending_facilities
+    global facilities_data, facilities_metadata
     global market_watermark, facility_watermark
     global last_known_facility_values, facilities_updated_this_bucket, current_processing_bucket
 
     facility_processed = 0
     market_processed = 0
-    pending_added = 0
-    pending_resolved = 0
     late_market_count = 0
     late_facility_count = 0
     forward_filled_count = 0
@@ -394,57 +387,7 @@ def integrate_data_sources():
         except Exception as e:
             print(f"Error processing market data: {e}")
 
-    # Step 2: Process pending facilities (check timeouts and retry with new market data)
-    if pending_facilities:
-        still_pending = []
-        for pending_item in pending_facilities:
-            msg = pending_item['msg']
-            metadata = pending_item['metadata']
-            received_time = pending_item['received_time']
-
-            age = time.time() - received_time
-            if age > MAX_PENDING_AGE_SECONDS:
-                # Timeout exceeded - force publish even without market data
-                record, _ = process_facility_message(msg, metadata)
-                facility_code = msg['facility_code']
-                facilities_data[facility_code] = record
-                facility_processed += 1
-
-                # Track update and last known values
-                facilities_updated_this_bucket.add(facility_code)
-                last_known_facility_values[facility_code] = {
-                    'power': msg['power'],
-                    'emissions': msg['emissions'],
-                    'timestamp': msg['timestamp']
-                }
-                print(f"[TIMEOUT] {facility_code} released after {age:.1f}s (no market data)")
-                continue
-
-            # Only retry matching if new market data arrived
-            if market_processed > 0:
-                record, has_market = process_facility_message(msg, metadata)
-
-                if has_market:
-                    # Market data now available!
-                    facility_code = msg['facility_code']
-                    facilities_data[facility_code] = record
-                    facility_processed += 1
-                    pending_resolved += 1
-
-                    # Track update and last known values
-                    facilities_updated_this_bucket.add(facility_code)
-                    last_known_facility_values[facility_code] = {
-                        'power': msg['power'],
-                        'emissions': msg['emissions'],
-                        'timestamp': msg['timestamp']
-                    }
-                    continue
-
-            # Still pending
-            still_pending.append(pending_item)
-
-        pending_facilities = still_pending
-
+    # Step 2: Process new facility messages from MQTT queue
     while not facility_queue.empty():
         try:
             msg = facility_queue.get_nowait()
@@ -479,29 +422,20 @@ def integrate_data_sources():
 
             record, has_market = process_facility_message(msg, metadata)
 
-            market_has_passed = (market_watermark is not None and
-                               msg_timestamp < market_watermark - timedelta(seconds=WATERMARK_LAG_SECONDS))
+            # Add facility to dashboard immediately (don't wait for market data)
+            # Market data will be None if not available yet, can be updated later
+            facilities_data[facility_code] = record
+            facility_processed += 1
 
-            if has_market or market_has_passed:
-                facilities_data[facility_code] = record
-                facility_processed += 1
+            # Track this facility as updated in current bucket
+            facilities_updated_this_bucket.add(facility_code)
 
-                # Track this facility as updated in current bucket
-                facilities_updated_this_bucket.add(facility_code)
-
-                # Update last known values for forward-fill
-                last_known_facility_values[facility_code] = {
-                    'power': msg['power'],
-                    'emissions': msg['emissions'],
-                    'timestamp': msg['timestamp']
-                }
-            else:
-                pending_facilities.append({
-                    'msg': msg,
-                    'metadata': metadata,
-                    'received_time': time.time()
-                })
-                pending_added += 1
+            # Update last known values for forward-fill
+            last_known_facility_values[facility_code] = {
+                'power': msg['power'],
+                'emissions': msg['emissions'],
+                'timestamp': msg['timestamp']
+            }
 
         except queue.Empty:
             break
@@ -509,16 +443,10 @@ def integrate_data_sources():
             print(f"Error integrating facility data: {e}")
 
     # Log status with watermark info
-    if facility_processed > 0 or market_processed > 0 or pending_added > 0 or pending_resolved > 0 or forward_filled_count > 0:
+    if facility_processed > 0 or market_processed > 0 or forward_filled_count > 0:
         status_parts = [f"Processed: {facility_processed} facilities, {market_processed} market updates"]
         if forward_filled_count > 0:
             status_parts.append(f"forward-filled: {forward_filled_count}")
-        if pending_resolved > 0:
-            status_parts.append(f"resolved {pending_resolved} pending")
-        if pending_added > 0:
-            status_parts.append(f"added {pending_added} to pending")
-        if len(pending_facilities) > 0:
-            status_parts.append(f"waiting: {len(pending_facilities)}")
         if late_market_count > 0:
             status_parts.append(f"late market: {late_market_count}")
         if late_facility_count > 0:
